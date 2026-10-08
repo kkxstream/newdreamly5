@@ -1,23 +1,26 @@
-// ============================================================
-// Dreamly5 / MusicMax - API / fetch.js
-// Same frontend code works on Vercel + Cloudflare Pages
-// ============================================================
+const API_URL = "https://jiosaavndev.vercel.app/api/";
 
-const API_URL = "/api";
 const DEFAULT_LIMIT = 150;
+const DEFAULT_PAGE = 0;
+
+/*
+|--------------------------------------------------------------------------
+| URL Builder
+|--------------------------------------------------------------------------
+*/
 
 const buildUrl = (endpoint, params = {}) => {
   const cleanEndpoint = String(endpoint || "")
-    .replace(/^\/+/, "")
-    .replace(/\/+$/, "");
+    .replace(/^\/+/, "");
 
-  const url = new URL(
-    `${API_URL}/${cleanEndpoint}`,
-    window.location.origin
-  );
+  const url = new URL(cleanEndpoint, API_URL);
 
   Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== "") {
+    if (
+      value !== undefined &&
+      value !== null &&
+      value !== ""
+    ) {
       url.searchParams.set(key, String(value));
     }
   });
@@ -25,124 +28,418 @@ const buildUrl = (endpoint, params = {}) => {
   return url.toString();
 };
 
-const apiRequest = async (endpoint, params = {}, options = {}) => {
+/*
+|--------------------------------------------------------------------------
+| Common API Request
+|--------------------------------------------------------------------------
+*/
+
+const apiRequest = async (endpoint, params = {}) => {
   const url = buildUrl(endpoint, params);
 
   try {
     const response = await fetch(url, {
-      method: options.method || "GET",
-      headers: { Accept: "application/json", ...(options.headers || {}) },
-      signal: options.signal,
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
     });
 
-    const contentType = response.headers.get("content-type") || "";
+    const contentType =
+      response.headers.get("content-type") || "";
+
     let data;
 
     if (contentType.includes("application/json")) {
       data = await response.json();
     } else {
       const text = await response.text();
-      try { data = JSON.parse(text); } catch { data = text; }
+
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = text;
+      }
     }
 
     if (!response.ok) {
-      throw new Error(
-        data?.message || data?.error ||
-        `Request failed: ${response.status} ${response.statusText}`
-      );
+      const message =
+        data?.message ||
+        data?.error ||
+        data?.data?.message ||
+        `Request failed: ${response.status} ${response.statusText}`;
+
+      throw new Error(message);
     }
+
+    /*
+     * Some API versions return:
+     *
+     * {
+     *   success: true,
+     *   data: {...}
+     * }
+     *
+     * Keep the complete response because existing
+     * components expect response.data.
+     */
 
     return data;
   } catch (error) {
-    console.error("API Error:", error);
-    console.error("URL:", url);
+    console.error("JioSaavn API Error:", error);
+    console.error("Request URL:", url);
+
     throw error;
   }
 };
 
-export const getSearchData = async (query, limit = DEFAULT_LIMIT) => {
-  if (!query?.trim()) throw new Error("Search query is required");
-  return apiRequest("search", { query: query.trim(), limit });
+/*
+|--------------------------------------------------------------------------
+| Query Validation
+|--------------------------------------------------------------------------
+*/
+
+const requireQuery = (query, name = "Search") => {
+  const value = String(query ?? "").trim();
+
+  if (!value) {
+    throw new Error(`${name} query is required`);
+  }
+
+  return value;
 };
 
-export const getSongbyQuery = async (query, limit = DEFAULT_LIMIT) => {
-  if (!query?.trim()) throw new Error("Song search query is required");
-  return apiRequest("search/songs", { query: query.trim(), limit });
+const requireId = (id, name = "ID") => {
+  const value = String(id ?? "").trim();
+
+  if (!value) {
+    throw new Error(`${name} is required`);
+  }
+
+  return value;
 };
 
+const normalizeLimit = (limit) => {
+  const value = Number(limit);
+
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_LIMIT;
+  }
+
+  return Math.min(Math.floor(value), 150);
+};
+
+/*
+|--------------------------------------------------------------------------
+| GENERAL SEARCH
+|--------------------------------------------------------------------------
+*/
+
+/**
+ * Search songs, albums, artists and playlists.
+ *
+ * GET /api/search?query=...
+ */
+export const getSearchData = async (
+  query,
+  limit = DEFAULT_LIMIT
+) => {
+  const searchQuery = requireQuery(query);
+  const safeLimit = normalizeLimit(limit);
+
+  return apiRequest("search", {
+    query: searchQuery,
+    limit: safeLimit,
+  });
+};
+
+/*
+|--------------------------------------------------------------------------
+| SONGS
+|--------------------------------------------------------------------------
+*/
+
+/**
+ * Search songs.
+ *
+ * GET /api/search/songs
+ */
+export const getSongbyQuery = async (
+  query,
+  limit = DEFAULT_LIMIT
+) => {
+  const searchQuery = requireQuery(
+    query,
+    "Song search"
+  );
+
+  return apiRequest("search/songs", {
+    query: searchQuery,
+    page: DEFAULT_PAGE,
+    limit: normalizeLimit(limit),
+  });
+};
+
+/**
+ * Alias.
+ */
+export const searchSongByQuery = getSongbyQuery;
+
+/**
+ * Get song by ID.
+ *
+ * GET /api/songs?id=...
+ */
 export const getSongById = async (songId) => {
-  if (songId === undefined || songId === null || String(songId).trim() === "") {
-    throw new Error("Song ID is required");
-  }
-  return apiRequest(`songs/${encodeURIComponent(String(songId).trim())}`);
+  const id = requireId(songId, "Song ID");
+
+  return apiRequest("songs", {
+    id,
+  });
 };
 
-export const getSuggestionSong = async (songId, limit = DEFAULT_LIMIT) => {
-  if (songId === undefined || songId === null || String(songId).trim() === "") {
-    throw new Error("Song ID is required");
-  }
-  return apiRequest(`songs/${encodeURIComponent(String(songId).trim())}/suggestions`, { limit });
+/**
+ * Alias used by some older components.
+ */
+export const fetchSongByID = getSongById;
+
+/**
+ * Get song suggestions.
+ *
+ * GET /api/songs/:id/suggestions
+ */
+export const getSuggestionSong = async (
+  songId,
+  limit = DEFAULT_LIMIT
+) => {
+  const id = requireId(songId, "Song ID");
+
+  return apiRequest(
+    `songs/${encodeURIComponent(id)}/suggestions`,
+    {
+      limit: normalizeLimit(limit),
+    }
+  );
 };
 
-export const fetchSongSuggestionsByID = getSuggestionSong;
+/**
+ * Alias.
+ */
+export const fetchSongSuggestionsByID =
+  getSuggestionSong;
 
+/*
+|--------------------------------------------------------------------------
+| LYRICS
+|--------------------------------------------------------------------------
+*/
+
+/**
+ * Get lyrics by song ID.
+ *
+ * GET /api/lyrics?id=...
+ */
 export const LyricsByID = async (songId) => {
-  if (songId === undefined || songId === null || String(songId).trim() === "") {
-    throw new Error("Song ID is required");
-  }
-  return apiRequest(`songs/${encodeURIComponent(String(songId).trim())}/lyrics`);
+  const id = requireId(songId, "Song ID");
+
+  return apiRequest("lyrics", {
+    id,
+  });
 };
 
-export const getArtistbyQuery = async (query, limit = DEFAULT_LIMIT) => {
-  if (!query?.trim()) throw new Error("Artist search query is required");
-  return apiRequest("search/artists", { query: query.trim(), limit });
+/**
+ * More readable alias.
+ */
+export const getLyricsById = LyricsByID;
+
+/*
+|--------------------------------------------------------------------------
+| ARTISTS
+|--------------------------------------------------------------------------
+*/
+
+/**
+ * Search artists.
+ *
+ * GET /api/search/artists
+ */
+export const getArtistbyQuery = async (
+  query,
+  limit = DEFAULT_LIMIT
+) => {
+  const searchQuery = requireQuery(
+    query,
+    "Artist search"
+  );
+
+  return apiRequest("search/artists", {
+    query: searchQuery,
+    page: DEFAULT_PAGE,
+    limit: normalizeLimit(limit),
+  });
 };
 
-export const searchArtistByQuery = getArtistbyQuery;
+/**
+ * Alias.
+ */
+export const searchArtistByQuery =
+  getArtistbyQuery;
 
-export const fetchArtistByID = async (artistId) => {
-  if (artistId === undefined || artistId === null || String(artistId).trim() === "") {
-    throw new Error("Artist ID is required");
-  }
-  return apiRequest("artists", { id: String(artistId).trim() });
+/**
+ * Get artist by ID.
+ *
+ * GET /api/artists?id=...
+ */
+export const fetchArtistByID = async (
+  artistId
+) => {
+  const id = requireId(artistId, "Artist ID");
+
+  return apiRequest("artists", {
+    id,
+  });
 };
 
-export const searchAlbumByQuery = async (query, limit = DEFAULT_LIMIT) => {
-  if (!query?.trim()) throw new Error("Album search query is required");
-  return apiRequest("search/albums", { query: query.trim(), limit });
+/*
+|--------------------------------------------------------------------------
+| ALBUMS
+|--------------------------------------------------------------------------
+*/
+
+/**
+ * Search albums.
+ *
+ * GET /api/search/albums
+ */
+export const searchAlbumByQuery = async (
+  query,
+  limit = DEFAULT_LIMIT
+) => {
+  const searchQuery = requireQuery(
+    query,
+    "Album search"
+  );
+
+  return apiRequest("search/albums", {
+    query: searchQuery,
+    page: DEFAULT_PAGE,
+    limit: normalizeLimit(limit),
+  });
 };
 
-export const fetchAlbumByID = async (albumId, limit = DEFAULT_LIMIT) => {
-  if (albumId === undefined || albumId === null || String(albumId).trim() === "") {
-    throw new Error("Album ID is required");
-  }
-  return apiRequest("albums", { id: String(albumId).trim(), limit });
+/**
+ * Alias.
+ */
+export const getAlbumbyQuery =
+  searchAlbumByQuery;
+
+/**
+ * Get album by ID.
+ *
+ * GET /api/albums?id=...
+ */
+export const fetchAlbumByID = async (
+  albumId
+) => {
+  const id = requireId(albumId, "Album ID");
+
+  return apiRequest("albums", {
+    id,
+  });
 };
 
-export const searchPlayListByQuery = async (query, limit = DEFAULT_LIMIT) => {
-  if (!query?.trim()) throw new Error("Playlist search query is required");
-  return apiRequest("search/playlists", { query: query.trim(), limit });
+/*
+|--------------------------------------------------------------------------
+| PLAYLISTS
+|--------------------------------------------------------------------------
+*/
+
+/**
+ * Search playlists.
+ *
+ * GET /api/search/playlists
+ */
+export const searchPlayListByQuery = async (
+  query,
+  limit = DEFAULT_LIMIT
+) => {
+  const searchQuery = requireQuery(
+    query,
+    "Playlist search"
+  );
+
+  return apiRequest("search/playlists", {
+    query: searchQuery,
+    page: DEFAULT_PAGE,
+    limit: normalizeLimit(limit),
+  });
 };
 
-export const fetchplaylistsByID = async (playlistId, limit = DEFAULT_LIMIT) => {
-  if (playlistId === undefined || playlistId === null || String(playlistId).trim() === "") {
-    throw new Error("Playlist ID is required");
-  }
-  return apiRequest("playlists", { id: String(playlistId).trim(), limit });
+/**
+ * Alias with standard spelling.
+ */
+export const searchPlaylistByQuery =
+  searchPlayListByQuery;
+
+/**
+ * Get playlist by ID.
+ *
+ * GET /api/playlists?id=...
+ */
+export const fetchplaylistsByID = async (
+  playlistId
+) => {
+  const id = requireId(
+    playlistId,
+    "Playlist ID"
+  );
+
+  return apiRequest("playlists", {
+    id,
+  });
 };
+
+/**
+ * Alias with standard naming.
+ */
+export const fetchPlaylistsByID =
+  fetchplaylistsByID;
+
+/*
+|--------------------------------------------------------------------------
+| DEFAULT EXPORT
+|--------------------------------------------------------------------------
+*/
 
 export default {
+  // General search
   getSearchData,
+
+  // Songs
   getSongbyQuery,
+  searchSongByQuery,
   getSongById,
+  fetchSongByID,
   getSuggestionSong,
   fetchSongSuggestionsByID,
+
+  // Lyrics
   LyricsByID,
+  getLyricsById,
+
+  // Artists
   getArtistbyQuery,
   searchArtistByQuery,
   fetchArtistByID,
+
+  // Albums
   searchAlbumByQuery,
+  getAlbumbyQuery,
   fetchAlbumByID,
+
+  // Playlists
   searchPlayListByQuery,
+  searchPlaylistByQuery,
   fetchplaylistsByID,
+  fetchPlaylistsByID,
 };
