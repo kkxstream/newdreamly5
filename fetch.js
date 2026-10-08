@@ -1,6 +1,15 @@
+/*
+|--------------------------------------------------------------------------
+| JioSaavn API
+|--------------------------------------------------------------------------
+| All search functions automatically paginate through ALL available
+| results instead of stopping at 150.
+|--------------------------------------------------------------------------
+*/
+
 const API_URL = "https://jiosaavndev.vercel.app/api/";
 
-const DEFAULT_LIMIT = 150;
+const PAGE_SIZE = 150;
 const DEFAULT_PAGE = 0;
 
 /*
@@ -10,8 +19,7 @@ const DEFAULT_PAGE = 0;
 */
 
 const buildUrl = (endpoint, params = {}) => {
-  const cleanEndpoint = String(endpoint || "")
-    .replace(/^\/+/, "");
+  const cleanEndpoint = String(endpoint || "").replace(/^\/+/, "");
 
   const url = new URL(cleanEndpoint, API_URL);
 
@@ -72,18 +80,6 @@ const apiRequest = async (endpoint, params = {}) => {
       throw new Error(message);
     }
 
-    /*
-     * Some API versions return:
-     *
-     * {
-     *   success: true,
-     *   data: {...}
-     * }
-     *
-     * Keep the complete response because existing
-     * components expect response.data.
-     */
-
     return data;
   } catch (error) {
     console.error("JioSaavn API Error:", error);
@@ -95,7 +91,7 @@ const apiRequest = async (endpoint, params = {}) => {
 
 /*
 |--------------------------------------------------------------------------
-| Query Validation
+| Validation
 |--------------------------------------------------------------------------
 */
 
@@ -119,77 +115,315 @@ const requireId = (id, name = "ID") => {
   return value;
 };
 
-const normalizeLimit = (limit) => {
-  const value = Number(limit);
+/*
+|--------------------------------------------------------------------------
+| Extract Results
+|--------------------------------------------------------------------------
+*/
 
-  if (!Number.isFinite(value) || value <= 0) {
-    return DEFAULT_LIMIT;
+const extractResults = (response) => {
+  if (Array.isArray(response)) {
+    return response;
   }
 
-  return Math.min(Math.floor(value), 150);
+  if (Array.isArray(response?.data)) {
+    return response.data;
+  }
+
+  if (Array.isArray(response?.data?.results)) {
+    return response.data.results;
+  }
+
+  if (Array.isArray(response?.results)) {
+    return response.results;
+  }
+
+  return [];
+};
+
+/*
+|--------------------------------------------------------------------------
+| Extract Total
+|--------------------------------------------------------------------------
+*/
+
+const extractTotal = (response) => {
+  const possibleTotals = [
+    response?.data?.total,
+    response?.total,
+  ];
+
+  for (const value of possibleTotals) {
+    const total = Number(value);
+
+    if (
+      Number.isFinite(total) &&
+      total >= 0
+    ) {
+      return total;
+    }
+  }
+
+  return null;
+};
+
+/*
+|--------------------------------------------------------------------------
+| Fetch ALL Pages
+|--------------------------------------------------------------------------
+|
+| This is the important part.
+|
+| The API may return only 150 results per request.
+| We automatically continue:
+|
+| page=0
+| page=1
+| page=2
+| page=3
+| ...
+|
+| until there are no more results.
+|--------------------------------------------------------------------------
+*/
+
+const fetchAllPages = async (
+  endpoint,
+  params = {},
+  pageSize = PAGE_SIZE
+) => {
+  const allResults = [];
+
+  let page = DEFAULT_PAGE;
+  let total = null;
+
+  while (true) {
+    const response = await apiRequest(endpoint, {
+      ...params,
+      page,
+      limit: pageSize,
+    });
+
+    const results = extractResults(response);
+
+    if (page === DEFAULT_PAGE) {
+      total = extractTotal(response);
+    }
+
+    if (!results.length) {
+      break;
+    }
+
+    allResults.push(...results);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Stop when API tells us the total
+    |--------------------------------------------------------------------------
+    */
+
+    if (
+      total !== null &&
+      allResults.length >= total
+    ) {
+      break;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | If less than requested page size was returned,
+    | normally this is the final page.
+    |--------------------------------------------------------------------------
+    */
+
+    if (results.length < pageSize) {
+      break;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Safety protection against an API repeatedly returning
+    | exactly the same page forever.
+    |--------------------------------------------------------------------------
+    */
+
+    if (page > 10000) {
+      console.warn(
+        "JioSaavn pagination stopped after 10,000 pages."
+      );
+      break;
+    }
+
+    page += 1;
+  }
+
+  /*
+  |--------------------------------------------------------------------------
+  | Remove duplicate IDs
+  |--------------------------------------------------------------------------
+  */
+
+  const uniqueResults = [];
+  const seen = new Set();
+
+  for (const item of allResults) {
+    const id =
+      item?.id ??
+      item?.albumId ??
+      item?.artistId ??
+      item?.playlistId;
+
+    if (id !== undefined && id !== null) {
+      const key = String(id);
+
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+    }
+
+    uniqueResults.push(item);
+  }
+
+  return uniqueResults;
+};
+
+/*
+|--------------------------------------------------------------------------
+| Build Combined Response
+|--------------------------------------------------------------------------
+|
+| Existing components expect:
+|
+| response.data.results
+|
+| So we preserve that structure.
+|--------------------------------------------------------------------------
+*/
+
+const createResultsResponse = (
+  results,
+  originalResponse = {}
+) => {
+  const originalData =
+    originalResponse?.data &&
+    typeof originalResponse.data === "object" &&
+    !Array.isArray(originalResponse.data)
+      ? originalResponse.data
+      : {};
+
+  return {
+    ...originalResponse,
+
+    success:
+      originalResponse?.success !== undefined
+        ? originalResponse.success
+        : true,
+
+    data: {
+      ...originalData,
+      results,
+      total: results.length,
+      start: 0,
+      count: results.length,
+    },
+  };
 };
 
 /*
 |--------------------------------------------------------------------------
 | GENERAL SEARCH
 |--------------------------------------------------------------------------
+|
+| General search is kept as a single request because this endpoint
+| returns multiple categories together.
+|--------------------------------------------------------------------------
 */
 
-/**
- * Search songs, albums, artists and playlists.
- *
- * GET /api/search?query=...
- */
-export const getSearchData = async (
-  query,
-  limit = DEFAULT_LIMIT
-) => {
+export const getSearchData = async (query) => {
   const searchQuery = requireQuery(query);
-  const safeLimit = normalizeLimit(limit);
 
   return apiRequest("search", {
     query: searchQuery,
-    limit: safeLimit,
   });
 };
 
 /*
 |--------------------------------------------------------------------------
-| SONGS
+| SONG SEARCH - ALL SONGS
 |--------------------------------------------------------------------------
 */
 
-/**
- * Search songs.
- *
- * GET /api/search/songs
- */
-export const getSongbyQuery = async (
-  query,
-  limit = DEFAULT_LIMIT
-) => {
+export const getSongbyQuery = async (query) => {
   const searchQuery = requireQuery(
     query,
     "Song search"
   );
 
-  return apiRequest("search/songs", {
-    query: searchQuery,
-    page: DEFAULT_PAGE,
-    limit: normalizeLimit(limit),
-  });
+  let firstResponse = null;
+
+  const results = [];
+
+  let page = DEFAULT_PAGE;
+  let total = null;
+
+  while (true) {
+    const response = await apiRequest(
+      "search/songs",
+      {
+        query: searchQuery,
+        page,
+        limit: PAGE_SIZE,
+      }
+    );
+
+    if (!firstResponse) {
+      firstResponse = response;
+      total = extractTotal(response);
+    }
+
+    const pageResults = extractResults(response);
+
+    if (!pageResults.length) {
+      break;
+    }
+
+    results.push(...pageResults);
+
+    if (
+      total !== null &&
+      results.length >= total
+    ) {
+      break;
+    }
+
+    if (pageResults.length < PAGE_SIZE) {
+      break;
+    }
+
+    if (page > 10000) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return createResultsResponse(
+    results,
+    firstResponse
+  );
 };
 
-/**
- * Alias.
- */
-export const searchSongByQuery = getSongbyQuery;
+export const searchSongByQuery =
+  getSongbyQuery;
 
-/**
- * Get song by ID.
- *
- * GET /api/songs?id=...
- */
+/*
+|--------------------------------------------------------------------------
+| SONG BY ID
+|--------------------------------------------------------------------------
+*/
+
 export const getSongById = async (songId) => {
   const id = requireId(songId, "Song ID");
 
@@ -198,33 +432,36 @@ export const getSongById = async (songId) => {
   });
 };
 
-/**
- * Alias used by some older components.
- */
-export const fetchSongByID = getSongById;
+export const fetchSongByID =
+  getSongById;
 
-/**
- * Get song suggestions.
- *
- * GET /api/songs/:id/suggestions
- */
+/*
+|--------------------------------------------------------------------------
+| SONG SUGGESTIONS - ALL
+|--------------------------------------------------------------------------
+*/
+
 export const getSuggestionSong = async (
-  songId,
-  limit = DEFAULT_LIMIT
+  songId
 ) => {
-  const id = requireId(songId, "Song ID");
-
-  return apiRequest(
-    `songs/${encodeURIComponent(id)}/suggestions`,
-    {
-      limit: normalizeLimit(limit),
-    }
+  const id = requireId(
+    songId,
+    "Song ID"
   );
+
+  return fetchAllPages(
+    `songs/${encodeURIComponent(id)}/suggestions`
+  ).then((results) => ({
+    success: true,
+    data: {
+      results,
+      total: results.length,
+      start: 0,
+      count: results.length,
+    },
+  }));
 };
 
-/**
- * Alias.
- */
 export const fetchSongSuggestionsByID =
   getSuggestionSong;
 
@@ -234,66 +471,105 @@ export const fetchSongSuggestionsByID =
 |--------------------------------------------------------------------------
 */
 
-/**
- * Get lyrics by song ID.
- *
- * GET /api/lyrics?id=...
- */
 export const LyricsByID = async (songId) => {
-  const id = requireId(songId, "Song ID");
+  const id = requireId(
+    songId,
+    "Song ID"
+  );
 
   return apiRequest("lyrics", {
     id,
   });
 };
 
-/**
- * More readable alias.
- */
-export const getLyricsById = LyricsByID;
+export const getLyricsById =
+  LyricsByID;
 
 /*
 |--------------------------------------------------------------------------
-| ARTISTS
+| ARTIST SEARCH - ALL ARTISTS
 |--------------------------------------------------------------------------
 */
 
-/**
- * Search artists.
- *
- * GET /api/search/artists
- */
 export const getArtistbyQuery = async (
-  query,
-  limit = DEFAULT_LIMIT
+  query
 ) => {
   const searchQuery = requireQuery(
     query,
     "Artist search"
   );
 
-  return apiRequest("search/artists", {
-    query: searchQuery,
-    page: DEFAULT_PAGE,
-    limit: normalizeLimit(limit),
-  });
+  let firstResponse = null;
+
+  const results = [];
+
+  let page = DEFAULT_PAGE;
+  let total = null;
+
+  while (true) {
+    const response = await apiRequest(
+      "search/artists",
+      {
+        query: searchQuery,
+        page,
+        limit: PAGE_SIZE,
+      }
+    );
+
+    if (!firstResponse) {
+      firstResponse = response;
+      total = extractTotal(response);
+    }
+
+    const pageResults =
+      extractResults(response);
+
+    if (!pageResults.length) {
+      break;
+    }
+
+    results.push(...pageResults);
+
+    if (
+      total !== null &&
+      results.length >= total
+    ) {
+      break;
+    }
+
+    if (pageResults.length < PAGE_SIZE) {
+      break;
+    }
+
+    if (page > 10000) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return createResultsResponse(
+    results,
+    firstResponse
+  );
 };
 
-/**
- * Alias.
- */
 export const searchArtistByQuery =
   getArtistbyQuery;
 
-/**
- * Get artist by ID.
- *
- * GET /api/artists?id=...
- */
+/*
+|--------------------------------------------------------------------------
+| ARTIST BY ID
+|--------------------------------------------------------------------------
+*/
+
 export const fetchArtistByID = async (
   artistId
 ) => {
-  const id = requireId(artistId, "Artist ID");
+  const id = requireId(
+    artistId,
+    "Artist ID"
+  );
 
   return apiRequest("artists", {
     id,
@@ -302,46 +578,89 @@ export const fetchArtistByID = async (
 
 /*
 |--------------------------------------------------------------------------
-| ALBUMS
+| ALBUM SEARCH - ALL ALBUMS
 |--------------------------------------------------------------------------
 */
 
-/**
- * Search albums.
- *
- * GET /api/search/albums
- */
 export const searchAlbumByQuery = async (
-  query,
-  limit = DEFAULT_LIMIT
+  query
 ) => {
   const searchQuery = requireQuery(
     query,
     "Album search"
   );
 
-  return apiRequest("search/albums", {
-    query: searchQuery,
-    page: DEFAULT_PAGE,
-    limit: normalizeLimit(limit),
-  });
+  let firstResponse = null;
+
+  const results = [];
+
+  let page = DEFAULT_PAGE;
+  let total = null;
+
+  while (true) {
+    const response = await apiRequest(
+      "search/albums",
+      {
+        query: searchQuery,
+        page,
+        limit: PAGE_SIZE,
+      }
+    );
+
+    if (!firstResponse) {
+      firstResponse = response;
+      total = extractTotal(response);
+    }
+
+    const pageResults =
+      extractResults(response);
+
+    if (!pageResults.length) {
+      break;
+    }
+
+    results.push(...pageResults);
+
+    if (
+      total !== null &&
+      results.length >= total
+    ) {
+      break;
+    }
+
+    if (pageResults.length < PAGE_SIZE) {
+      break;
+    }
+
+    if (page > 10000) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return createResultsResponse(
+    results,
+    firstResponse
+  );
 };
 
-/**
- * Alias.
- */
 export const getAlbumbyQuery =
   searchAlbumByQuery;
 
-/**
- * Get album by ID.
- *
- * GET /api/albums?id=...
- */
+/*
+|--------------------------------------------------------------------------
+| ALBUM BY ID
+|--------------------------------------------------------------------------
+*/
+
 export const fetchAlbumByID = async (
   albumId
 ) => {
-  const id = requireId(albumId, "Album ID");
+  const id = requireId(
+    albumId,
+    "Album ID"
+  );
 
   return apiRequest("albums", {
     id,
@@ -350,42 +669,82 @@ export const fetchAlbumByID = async (
 
 /*
 |--------------------------------------------------------------------------
-| PLAYLISTS
+| PLAYLIST SEARCH - ALL PLAYLISTS
 |--------------------------------------------------------------------------
 */
 
-/**
- * Search playlists.
- *
- * GET /api/search/playlists
- */
 export const searchPlayListByQuery = async (
-  query,
-  limit = DEFAULT_LIMIT
+  query
 ) => {
   const searchQuery = requireQuery(
     query,
     "Playlist search"
   );
 
-  return apiRequest("search/playlists", {
-    query: searchQuery,
-    page: DEFAULT_PAGE,
-    limit: normalizeLimit(limit),
-  });
+  let firstResponse = null;
+
+  const results = [];
+
+  let page = DEFAULT_PAGE;
+  let total = null;
+
+  while (true) {
+    const response = await apiRequest(
+      "search/playlists",
+      {
+        query: searchQuery,
+        page,
+        limit: PAGE_SIZE,
+      }
+    );
+
+    if (!firstResponse) {
+      firstResponse = response;
+      total = extractTotal(response);
+    }
+
+    const pageResults =
+      extractResults(response);
+
+    if (!pageResults.length) {
+      break;
+    }
+
+    results.push(...pageResults);
+
+    if (
+      total !== null &&
+      results.length >= total
+    ) {
+      break;
+    }
+
+    if (pageResults.length < PAGE_SIZE) {
+      break;
+    }
+
+    if (page > 10000) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return createResultsResponse(
+    results,
+    firstResponse
+  );
 };
 
-/**
- * Alias with standard spelling.
- */
 export const searchPlaylistByQuery =
   searchPlayListByQuery;
 
-/**
- * Get playlist by ID.
- *
- * GET /api/playlists?id=...
- */
+/*
+|--------------------------------------------------------------------------
+| PLAYLIST BY ID
+|--------------------------------------------------------------------------
+*/
+
 export const fetchplaylistsByID = async (
   playlistId
 ) => {
@@ -399,9 +758,6 @@ export const fetchplaylistsByID = async (
   });
 };
 
-/**
- * Alias with standard naming.
- */
 export const fetchPlaylistsByID =
   fetchplaylistsByID;
 
@@ -412,10 +768,14 @@ export const fetchPlaylistsByID =
 */
 
 export default {
-  // General search
+  /*
+  | General
+  */
   getSearchData,
 
-  // Songs
+  /*
+  | Songs
+  */
   getSongbyQuery,
   searchSongByQuery,
   getSongById,
@@ -423,21 +783,29 @@ export default {
   getSuggestionSong,
   fetchSongSuggestionsByID,
 
-  // Lyrics
+  /*
+  | Lyrics
+  */
   LyricsByID,
   getLyricsById,
 
-  // Artists
+  /*
+  | Artists
+  */
   getArtistbyQuery,
   searchArtistByQuery,
   fetchArtistByID,
 
-  // Albums
+  /*
+  | Albums
+  */
   searchAlbumByQuery,
   getAlbumbyQuery,
   fetchAlbumByID,
 
-  // Playlists
+  /*
+  | Playlists
+  */
   searchPlayListByQuery,
   searchPlaylistByQuery,
   fetchplaylistsByID,
